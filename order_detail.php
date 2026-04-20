@@ -301,60 +301,68 @@ $shippingStatus = $deriveShippingStatus($orderContext);
 $paymentBadgeUi = $paymentBadge($paymentStatus);
 $shippingBadgeUi = $shippingBadge($shippingStatus);
 
+$orderItems = isset($orderContext['items']) && is_array($orderContext['items']) ? $orderContext['items'] : [];
+$sellerOwnershipKeys = ['seller_user_id', 'seller_id', 'owner_user_id', 'user_id'];
+$getItemOwnerId = static function (array $itemRow) use ($sellerOwnershipKeys): ?int {
+    foreach ($sellerOwnershipKeys as $sellerKey) {
+        if (!array_key_exists($sellerKey, $itemRow) || !is_numeric($itemRow[$sellerKey])) {
+            continue;
+        }
+        return (int)$itemRow[$sellerKey];
+    }
+    return null;
+};
+
+$sellerVisibleItems = [];
+$observedOwnerIds = [];
+foreach ($orderItems as $itemRow) {
+    if (!is_array($itemRow)) {
+        continue;
+    }
+    $ownerId = $getItemOwnerId($itemRow);
+    if ($ownerId !== null && $ownerId > 0) {
+        $observedOwnerIds[$ownerId] = true;
+    }
+    if ($ownerId !== null && $ownerId !== $sellerUserId) {
+        continue;
+    }
+    $sellerVisibleItems[] = $itemRow;
+}
+$isMultiSellerOrder = count(array_keys($observedOwnerIds)) > 1;
+
+$lineTotalForItem = static function (array $itemRow): ?float {
+    foreach (['line_total', 'subtotal', 'item_total', 'total'] as $lineKey) {
+        if (isset($itemRow[$lineKey]) && is_numeric($itemRow[$lineKey])) {
+            return (float)$itemRow[$lineKey];
+        }
+    }
+
+    $unitPrice = null;
+    if (isset($itemRow['unit_price']) && is_numeric($itemRow['unit_price'])) {
+        $unitPrice = (float)$itemRow['unit_price'];
+    } elseif (isset($itemRow['price']) && is_numeric($itemRow['price'])) {
+        $unitPrice = (float)$itemRow['price'];
+    }
+
+    $qty = null;
+    if (isset($itemRow['quantity']) && is_numeric($itemRow['quantity'])) {
+        $qty = (float)$itemRow['quantity'];
+    } elseif (isset($itemRow['qty']) && is_numeric($itemRow['qty'])) {
+        $qty = (float)$itemRow['qty'];
+    }
+
+    if ($unitPrice !== null && $qty !== null) {
+        return $unitPrice * $qty;
+    }
+    return null;
+};
+
 $sellerItemsSubtotal = null;
-if (isset($orderContext['items']) && is_array($orderContext['items'])) {
+if (!empty($sellerVisibleItems)) {
     $subtotal = 0.0;
     $hasRows = false;
-    foreach ($orderContext['items'] as $itemRow) {
-        if (!is_array($itemRow)) {
-            continue;
-        }
-
-        $ownerFieldDetected = false;
-        $belongsToSeller = true;
-        foreach (['seller_user_id', 'seller_id'] as $sellerKey) {
-            if (!array_key_exists($sellerKey, $itemRow)) {
-                continue;
-            }
-            if (!is_numeric($itemRow[$sellerKey])) {
-                continue;
-            }
-            $ownerFieldDetected = true;
-            if ((int)$itemRow[$sellerKey] !== $sellerUserId) {
-                $belongsToSeller = false;
-            }
-            break;
-        }
-        if ($ownerFieldDetected && !$belongsToSeller) {
-            continue;
-        }
-
-        $lineTotal = null;
-        foreach (['line_total', 'subtotal', 'item_total', 'total'] as $lineKey) {
-            if (isset($itemRow[$lineKey]) && is_numeric($itemRow[$lineKey])) {
-                $lineTotal = (float)$itemRow[$lineKey];
-                break;
-            }
-        }
-        if ($lineTotal === null) {
-            $unitPrice = null;
-            if (isset($itemRow['unit_price']) && is_numeric($itemRow['unit_price'])) {
-                $unitPrice = (float)$itemRow['unit_price'];
-            } elseif (isset($itemRow['price']) && is_numeric($itemRow['price'])) {
-                $unitPrice = (float)$itemRow['price'];
-            }
-
-            $qty = null;
-            if (isset($itemRow['quantity']) && is_numeric($itemRow['quantity'])) {
-                $qty = (float)$itemRow['quantity'];
-            } elseif (isset($itemRow['qty']) && is_numeric($itemRow['qty'])) {
-                $qty = (float)$itemRow['qty'];
-            }
-
-            if ($unitPrice !== null && $qty !== null) {
-                $lineTotal = $unitPrice * $qty;
-            }
-        }
+    foreach ($sellerVisibleItems as $itemRow) {
+        $lineTotal = $lineTotalForItem($itemRow);
         if ($lineTotal !== null) {
             $subtotal += $lineTotal;
             $hasRows = true;
@@ -362,6 +370,14 @@ if (isset($orderContext['items']) && is_array($orderContext['items'])) {
     }
     if ($hasRows) {
         $sellerItemsSubtotal = $subtotal;
+    }
+}
+
+$fullOrderTotal = null;
+foreach (['order_total', 'grand_total', 'total_amount', 'total', 'amount_total'] as $totalKey) {
+    if (isset($orderContext[$totalKey]) && is_numeric($orderContext[$totalKey])) {
+        $fullOrderTotal = (float)$orderContext[$totalKey];
+        break;
     }
 }
 
@@ -600,6 +616,26 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
             gap: 16px;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
         }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        th, td {
+            text-align: left;
+            padding: 10px;
+            border-bottom: 1px solid var(--line);
+            font-size: 14px;
+        }
+        th {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            font-size: 12px;
+            background: var(--panel-soft);
+        }
     </style>
 </head>
 <body>
@@ -619,13 +655,65 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
     <section class="card">
         <h1>Seller Order Detail</h1>
         <div class="meta-grid">
-            <div class="meta-item"><span class="k">Order Code</span><span class="v"><?= $h($orderCode !== '' ? $orderCode : ('#' . $orderId)) ?></span></div>
             <div class="meta-item"><span class="k">Payment Status</span><span class="v"><span class="badge <?= $h((string)($paymentBadgeUi['class'] ?? 'badge-default')) ?>"><?= $h((string)($paymentBadgeUi['label'] ?? 'Unknown')) ?></span></span></div>
             <div class="meta-item"><span class="k">Shipping Status</span><span class="v"><span class="badge <?= $h((string)($shippingBadgeUi['class'] ?? 'badge-default')) ?>"><?= $h((string)($shippingBadgeUi['label'] ?? 'Unknown')) ?></span></span></div>
             <div class="meta-item"><span class="k">Buyer</span><span class="v"><?= $h($buyerName !== '' ? $buyerName : 'Unknown Buyer') ?></span></div>
             <div class="meta-item"><span class="k">Listing</span><span class="v"><?= $h($listingTitle !== '' ? $listingTitle : 'Listing unavailable') ?></span></div>
-            <div class="meta-item"><span class="k">Seller Items Subtotal</span><span class="v"><?= $h($sellerItemsSubtotal !== null ? $money($sellerItemsSubtotal, $currency) : '—') ?></span></div>
+            <div class="meta-item"><span class="k">Your Items Subtotal</span><span class="v"><?= $h($sellerItemsSubtotal !== null ? $money($sellerItemsSubtotal, $currency) : '—') ?></span></div>
+            <div class="meta-item"><span class="k">Full Order Total Snapshot</span><span class="v"><?= $h($fullOrderTotal !== null ? $money($fullOrderTotal, $currency) : '—') ?></span></div>
         </div>
+    </section>
+
+    <section class="card stack">
+        <h2>Your Items</h2>
+        <?php if (empty($sellerVisibleItems)): ?>
+            <div class="empty">No seller-owned line items are visible for this order.</div>
+        <?php else: ?>
+            <table>
+                <thead>
+                <tr>
+                    <th>Item</th>
+                    <th>Qty</th>
+                    <th>Unit Price</th>
+                    <th>Line Total</th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($sellerVisibleItems as $itemRow): ?>
+                    <?php
+                    $itemTitle = '';
+                    foreach (['title', 'name', 'item_name', 'listing_title', 'product_name'] as $titleKey) {
+                        if (isset($itemRow[$titleKey]) && trim((string)$itemRow[$titleKey]) !== '') {
+                            $itemTitle = trim((string)$itemRow[$titleKey]);
+                            break;
+                        }
+                    }
+                    $itemQty = null;
+                    foreach (['quantity', 'qty'] as $qtyKey) {
+                        if (isset($itemRow[$qtyKey]) && is_numeric($itemRow[$qtyKey])) {
+                            $itemQty = (float)$itemRow[$qtyKey];
+                            break;
+                        }
+                    }
+                    $itemUnitPrice = null;
+                    foreach (['unit_price', 'price'] as $priceKey) {
+                        if (isset($itemRow[$priceKey]) && is_numeric($itemRow[$priceKey])) {
+                            $itemUnitPrice = (float)$itemRow[$priceKey];
+                            break;
+                        }
+                    }
+                    $itemLineTotal = $lineTotalForItem($itemRow);
+                    ?>
+                    <tr>
+                        <td><?= $h($itemTitle !== '' ? $itemTitle : 'Item') ?></td>
+                        <td><?= $h($itemQty !== null ? (string)$itemQty : '—') ?></td>
+                        <td><?= $h($itemUnitPrice !== null ? $money($itemUnitPrice, $currency) : '—') ?></td>
+                        <td><?= $h($itemLineTotal !== null ? $money($itemLineTotal, $currency) : '—') ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
     </section>
 
     <section class="card stack">
@@ -718,10 +806,12 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
             <?php endif; ?>
         </div>
 
-        <div class="stack">
+         <div class="stack">
             <h3>Order Fulfillment Actions</h3>
             <?php if (!$fulfillmentActionEndpointExists): ?>
                 <div class="empty">Fulfillment actions are not enabled yet for this environment.</div>
+            <?php elseif ($isMultiSellerOrder): ?>
+                <div class="empty">Multi-seller fulfillment actions are not enabled yet for this environment.</div>
             <?php elseif (empty($fulfillmentActions)): ?>
                 <div class="empty">No fulfillment actions are currently available for this order state.</div>
             <?php else: ?>
