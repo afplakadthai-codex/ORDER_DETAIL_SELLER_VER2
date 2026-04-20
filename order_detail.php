@@ -315,20 +315,30 @@ $getItemOwnerId = static function (array $itemRow) use ($sellerOwnershipKeys): ?
 
 $sellerVisibleItems = [];
 $observedOwnerIds = [];
+$rowsWithNumericOwner = 0;
+$totalItemRows = 0;
 foreach ($orderItems as $itemRow) {
     if (!is_array($itemRow)) {
         continue;
     }
+    $totalItemRows++;
     $ownerId = $getItemOwnerId($itemRow);
     if ($ownerId !== null && $ownerId > 0) {
         $observedOwnerIds[$ownerId] = true;
+        $rowsWithNumericOwner++;
     }
     if ($ownerId !== null && $ownerId !== $sellerUserId) {
         continue;
     }
     $sellerVisibleItems[] = $itemRow;
 }
-$isMultiSellerOrder = count(array_keys($observedOwnerIds)) > 1;
+$distinctOwnerIds = array_keys($observedOwnerIds);
+$isMultiSellerOrder = count($distinctOwnerIds) > 1;
+$isClearlySingleSellerOrder = !$isMultiSellerOrder
+    && count($distinctOwnerIds) === 1
+    && (int)$distinctOwnerIds[0] === $sellerUserId
+    && $totalItemRows > 0
+    && $rowsWithNumericOwner === $totalItemRows;
 
 $lineTotalForItem = static function (array $itemRow): ?float {
     foreach (['line_total', 'subtotal', 'item_total', 'total'] as $lineKey) {
@@ -362,6 +372,10 @@ if (!empty($sellerVisibleItems)) {
     $subtotal = 0.0;
     $hasRows = false;
     foreach ($sellerVisibleItems as $itemRow) {
+        $ownerId = $getItemOwnerId($itemRow);
+        if ($ownerId !== null && $ownerId !== $sellerUserId) {
+            continue;
+        }
         $lineTotal = $lineTotalForItem($itemRow);
         if ($lineTotal !== null) {
             $subtotal += $lineTotal;
@@ -379,6 +393,39 @@ foreach (['order_total', 'grand_total', 'total_amount', 'total', 'amount_total']
         $fullOrderTotal = (float)$orderContext[$totalKey];
         break;
     }
+}
+
+$sellerVisibleCount = count($sellerVisibleItems);
+$sellerVisibleListingTitle = '';
+if ($sellerVisibleCount === 1) {
+    foreach (['title', 'name', 'item_name', 'listing_title', 'product_name'] as $titleKey) {
+        if (isset($sellerVisibleItems[0][$titleKey]) && trim((string)$sellerVisibleItems[0][$titleKey]) !== '') {
+            $sellerVisibleListingTitle = trim((string)$sellerVisibleItems[0][$titleKey]);
+            break;
+        }
+    }
+}
+if ($sellerVisibleCount > 1) {
+    $firstTitle = '';
+    foreach ($sellerVisibleItems as $itemRow) {
+        if (!is_array($itemRow)) {
+            continue;
+        }
+        foreach (['title', 'name', 'item_name', 'listing_title', 'product_name'] as $titleKey) {
+            if (isset($itemRow[$titleKey]) && trim((string)$itemRow[$titleKey]) !== '') {
+                $firstTitle = trim((string)$itemRow[$titleKey]);
+                break 2;
+            }
+        }
+    }
+    if ($firstTitle !== '') {
+        $sellerVisibleListingTitle = $firstTitle . ' +' . (string)($sellerVisibleCount - 1) . ' more';
+    } else {
+        $sellerVisibleListingTitle = (string)$sellerVisibleCount . ' seller-visible items';
+    }
+}
+if ($sellerVisibleListingTitle === '') {
+    $sellerVisibleListingTitle = $listingTitle !== '' ? $listingTitle : 'Listing unavailable';
 }
 
 $requestActionEndpoint = '/seller/order_request_action.php';
@@ -658,7 +705,7 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
             <div class="meta-item"><span class="k">Payment Status</span><span class="v"><span class="badge <?= $h((string)($paymentBadgeUi['class'] ?? 'badge-default')) ?>"><?= $h((string)($paymentBadgeUi['label'] ?? 'Unknown')) ?></span></span></div>
             <div class="meta-item"><span class="k">Shipping Status</span><span class="v"><span class="badge <?= $h((string)($shippingBadgeUi['class'] ?? 'badge-default')) ?>"><?= $h((string)($shippingBadgeUi['label'] ?? 'Unknown')) ?></span></span></div>
             <div class="meta-item"><span class="k">Buyer</span><span class="v"><?= $h($buyerName !== '' ? $buyerName : 'Unknown Buyer') ?></span></div>
-            <div class="meta-item"><span class="k">Listing</span><span class="v"><?= $h($listingTitle !== '' ? $listingTitle : 'Listing unavailable') ?></span></div>
+            <div class="meta-item"><span class="k">Listing</span><span class="v"><?= $h($sellerVisibleListingTitle) ?></span></div>
             <div class="meta-item"><span class="k">Your Items Subtotal</span><span class="v"><?= $h($sellerItemsSubtotal !== null ? $money($sellerItemsSubtotal, $currency) : '—') ?></span></div>
             <div class="meta-item"><span class="k">Full Order Total Snapshot</span><span class="v"><?= $h($fullOrderTotal !== null ? $money($fullOrderTotal, $currency) : '—') ?></span></div>
         </div>
@@ -735,8 +782,9 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
     </section>
 
     <section class="split">
-        <div class="card stack">
+          <div class="card stack">
             <h3>Cancel Request</h3>
+            <div class="muted">Order-level request data (may include non-seller-line context).</div>
             <?php if ($cancelRow): ?>
                 <div class="meta-grid">
                     <div class="meta-item"><span class="k">Status</span><span class="v"><span class="badge <?= $h((string)($cancelBadge['class'] ?? 'badge-default')) ?>"><?= $h((string)($cancelBadge['label'] ?? 'Unknown')) ?></span></span></div>
@@ -753,8 +801,9 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
             <?php endif; ?>
         </div>
 
-        <div class="card stack">
+         <div class="card stack">
             <h3>Refund Request</h3>
+            <div class="muted">Order-level request data (may include non-seller-line context).</div>
             <?php if ($refundRow): ?>
                 <div class="meta-grid">
                     <div class="meta-item"><span class="k">Refund Code</span><span class="v"><?= $h($pickValue($refundRow, ['refund_code']) ?: '—') ?></span></div>
@@ -806,12 +855,14 @@ if ($orderStatus === 'shipped' || $shippingStatusKey === 'shipped') {
             <?php endif; ?>
         </div>
 
-         <div class="stack">
+        <div class="stack">
             <h3>Order Fulfillment Actions</h3>
             <?php if (!$fulfillmentActionEndpointExists): ?>
                 <div class="empty">Fulfillment actions are not enabled yet for this environment.</div>
             <?php elseif ($isMultiSellerOrder): ?>
                 <div class="empty">Multi-seller fulfillment actions are not enabled yet for this environment.</div>
+            <?php elseif (!$isClearlySingleSellerOrder): ?>
+                <div class="empty">Read-only mode: fulfillment actions require a clearly single-seller order in this environment.</div>
             <?php elseif (empty($fulfillmentActions)): ?>
                 <div class="empty">No fulfillment actions are currently available for this order state.</div>
             <?php else: ?>
